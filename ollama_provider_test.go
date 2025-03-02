@@ -2,9 +2,17 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/ollama/ollama/api"
 )
 
 func TestOllamaProvider(t *testing.T) {
@@ -201,4 +209,196 @@ func TestOllamaProviderError(t *testing.T) {
 			t.Error("使用无效模型名称时期望得到错误，但没有")
 		}
 	})
+}
+
+func setupMockOllamaServer() (*httptest.Server, *OllamaProvider) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// 检查上下文是否已取消
+		if r.Context().Err() != nil {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			json.NewEncoder(w).Encode(map[string]string{"error": "context deadline exceeded"})
+			return
+		}
+
+		// 读取请求体
+		var req struct {
+			Input  string `json:"input"`
+			Model  string `json:"model"`
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		// 检查输入
+		input := req.Input
+		if input == "" {
+			input = req.Prompt // 某些API使用prompt字段
+		}
+		if input == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "empty input is not allowed"})
+			return
+		}
+
+		// 模拟处理延迟
+		select {
+		case <-r.Context().Done():
+			w.WriteHeader(http.StatusGatewayTimeout)
+			json.NewEncoder(w).Encode(map[string]string{"error": "context deadline exceeded"})
+			return
+		case <-time.After(100 * time.Millisecond):
+			// 继续处理
+		}
+
+		switch r.URL.Path {
+		case "/api/embeddings":
+			// 检查模型
+			if req.Model != "" && req.Model != "mxbai-embed-large" && !strings.Contains(req.Model, "custom") {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "unsupported model"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"embedding": []float64{0.1, 0.2, 0.3},
+				"usage": map[string]int{
+					"prompt_tokens": len(input),
+					"total_tokens":  len(input),
+				},
+			})
+		case "/api/generate":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"response": "test response",
+				"usage": map[string]int{
+					"prompt_tokens":     len(input),
+					"completion_tokens": 10,
+					"total_tokens":      len(input) + 10,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unknown endpoint"})
+		}
+	}))
+
+	serverURL, _ := url.Parse(server.URL)
+	provider := &OllamaProvider{
+		embedModel: "mxbai-embed-large",
+		client:     api.NewClient(serverURL, server.Client()),
+	}
+
+	return server, provider
+}
+
+func TestOllamaProvider_GetEmbedModel(t *testing.T) {
+	server, provider := setupMockOllamaServer()
+	defer server.Close()
+
+	got := provider.GetEmbedModel()
+	want := "mxbai-embed-large"
+
+	if got != want {
+		t.Errorf("GetEmbedModel() = %v, want %v", got, want)
+	}
+}
+
+func TestOllamaProvider_Embed(t *testing.T) {
+	server, provider := setupMockOllamaServer()
+	defer server.Close()
+
+	ctx := context.Background()
+	request := EmbeddingRequest{
+		Input: "test text",
+	}
+
+	// 使用默认的嵌入模型
+	embedModel := provider.GetEmbedModel()
+	response, err := provider.Embed(ctx, embedModel, request)
+
+	if err != nil {
+		t.Errorf("Embed() error = %v", err)
+		return
+	}
+
+	// 验证返回的嵌入向量
+	expectedEmbedding := []float64{0.1, 0.2, 0.3}
+	if len(response.Embedding) != len(expectedEmbedding) {
+		t.Errorf("Embed() returned embedding of length %d, want %d", len(response.Embedding), len(expectedEmbedding))
+	}
+}
+
+func TestOllamaProvider_EmbedWithCustomModel(t *testing.T) {
+	server, provider := setupMockOllamaServer()
+	defer server.Close()
+
+	ctx := context.Background()
+	request := EmbeddingRequest{
+		Input: "test text",
+		Model: "custom-embed-model", // 使用自定义模型
+	}
+
+	// 使用自定义模型进行嵌入
+	_, err := provider.Embed(ctx, request.Model, request)
+
+	// 即使是mock服务器，我们也应该能得到正确的响应
+	if err != nil {
+		t.Errorf("Embed() with custom model error = %v", err)
+	}
+}
+
+func TestOllamaProvider_EmbedWithInvalidInput(t *testing.T) {
+	server, provider := setupMockOllamaServer()
+	defer server.Close()
+
+	ctx := context.Background()
+	request := EmbeddingRequest{
+		Input: "", // 空输入
+	}
+
+	embedModel := provider.GetEmbedModel()
+	_, err := provider.Embed(ctx, embedModel, request)
+
+	if err == nil {
+		t.Error("Expected error with empty input, got nil")
+	}
+}
+
+func TestOllamaProvider_EmbedWithContext(t *testing.T) {
+	server, provider := setupMockOllamaServer()
+	defer server.Close()
+
+	// 创建一个带有超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	request := EmbeddingRequest{
+		Input: "test text",
+		Metadata: map[string]interface{}{
+			"test_key": "test_value",
+		},
+	}
+
+	embedModel := provider.GetEmbedModel()
+	response, err := provider.Embed(ctx, embedModel, request)
+
+	// 检查上下文是否已经超时
+	if ctx.Err() != nil {
+		t.Errorf("Context error: %v", ctx.Err())
+		return
+	}
+
+	// 验证响应
+	if err != nil {
+		t.Errorf("Embed() error = %v", err)
+		return
+	}
+
+	expectedEmbedding := []float64{0.1, 0.2, 0.3}
+	if len(response.Embedding) != len(expectedEmbedding) {
+		t.Errorf("Embed() returned embedding of length %d, want %d", len(response.Embedding), len(expectedEmbedding))
+	}
 }

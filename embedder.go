@@ -29,6 +29,8 @@ func NewLLMEmbedder(service Service, provider, model string, dimensions int) *LL
 func (e *LLMEmbedder) SetMaxPoolSize(size int) {
 	if size > 0 {
 		e.maxPoolSize = size
+	} else {
+		e.maxPoolSize = 10 // 保持默认值
 	}
 }
 
@@ -44,7 +46,7 @@ func (e *LLMEmbedder) Embed(ctx context.Context, content interface{}) ([]float64
 	case fmt.Stringer:
 		textContent = c.String()
 	default:
-		return nil, fmt.Errorf("unsupported content type: %T", content)
+		return nil, fmt.Errorf("unsupported content type")
 	}
 
 	// 创建嵌入请求

@@ -172,6 +172,10 @@ func (p *OllamaProvider) Chat(ctx context.Context, modelID string, request ChatR
 
 // Embed 生成文本的嵌入向量
 func (p *OllamaProvider) Embed(ctx context.Context, modelID string, request EmbeddingRequest) (EmbeddingResponse, error) {
+	if request.Input == "" {
+		return EmbeddingResponse{}, fmt.Errorf("empty input is not allowed")
+	}
+
 	embedRequest := api.EmbeddingRequest{
 		Model:  modelID,
 		Prompt: request.Input,
