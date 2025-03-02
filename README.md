@@ -17,6 +17,35 @@
   - 支持自定义模型
   - 支持聊天和文本补全功能
 
+
+ 已经实现Provider接口, 可以参考以下代码:
+```bash
+// Provider 表示LLM服务提供者接口
+type Provider interface {
+	// 获取提供者名称
+	Name() string
+
+	// 获取可用模型列表
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+
+	// 获取指定模型信息
+	GetModel(ctx context.Context, modelID string) (ModelInfo, error)
+
+	// 文本补全
+	Complete(ctx context.Context, modelID string, request CompletionRequest) (CompletionResponse, error)
+
+	// 聊天补全
+	Chat(ctx context.Context, modelID string, request ChatRequest) (ChatResponse, error)
+
+	// 文本嵌入
+	Embed(ctx context.Context, modelID string, request EmbeddingRequest) (EmbeddingResponse, error)
+
+	// GetEmbedModel 获取嵌入模型
+	GetEmbedModel() string
+}
+
+```
+
 ## 安装
 
 ```bash
